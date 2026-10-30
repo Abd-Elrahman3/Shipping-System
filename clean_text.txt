@@ -1,0 +1,740 @@
+﻿Shipping System
+Design Patterns â€” Full Implementation Guide
+Software Design and Architecture Project
+1. Project Overview
+This document describes the complete Java implementation of a Shipping System designed using nine Gang-of-Four design patterns. Each pattern is chosen to solve a specific structural or behavioral challenge in the system. The document covers the class structure, the reason each pattern was selected, and the full Java source code for every component.
+1.1 Pattern Summary
+Feature
+Pattern
+Why
+Vehicle & courier selection
+Strategy
+Multiple interchangeable selection algorithms that can be swapped at runtime without changing the client code.
+Pricing engine
+Strategy + Chain of Responsibility
+Price is computed by chaining independent handlers (weight, distance, date, item type), each adding its own cost.
+Packaging type
+Factory Method
+Each item category requires a different packaging object; the factory isolates creation logic from the rest of the system.
+Order creation
+Builder
+A shipping order has many optional fields; the Builder prevents telescoping constructors and enforces step-by-step assembly.
+Country -> vehicle rules
+State
+Allowed vehicles differ per country/region; State encapsulates per-region behavior so no giant if-else chain is needed.
+Courier assignment
+Observer
+When a vehicle is assigned, available couriers are notified automatically â€” fully decoupled.
+Review system
+Decorator
+Adds rating and feedback capability to any Courier without modifying the Courier class itself.
+Delivery date -> price
+Template Method
+The pricing skeleton is fixed (base + modifier + total); subclasses override only the date-modifier step.
+Infrastructure
+Proxy + Facade + Singleton
+Proxy caches vehicle lookups; Facade is the single entry point; Singleton shares configuration system-wide.
+2. Package & Class Structure
+Organize the project under the root package com.shipping with the following sub-packages:
+com.shipping
+  facade/
+    ShippingService.java              (Facade)
+  model/
+    ShippingOrder.java               (Builder pattern)
+    Vehicle.java
+    Courier.java                     (base interface)
+    ReviewableCourier.java           (Decorator)
+    Item.java
+  pricing/
+    PricingStrategy.java             (Strategy interface)
+    CompositePricingStrategy.java    (Strategy implementation)
+    PricingHandler.java              (Chain of Responsibility base)
+    WeightPricingHandler.java
+    DistancePricingHandler.java
+    DatePricingHandler.java
+    ItemTypePricingHandler.java
+    DeliveryPriceCalculator.java     (Template Method base)
+    ExpressCalculator.java
+    StandardCalculator.java
+  selection/
+    SelectionStrategy.java           (Strategy interface)
+    ByCountrySelectionStrategy.java
+    ByWeightSelectionStrategy.java
+  packaging/
+    Packaging.java                   (interface)
+    PackagingFactory.java            (Factory Method base)
+    FragilePackagingFactory.java
+    LiquidPackagingFactory.java
+    StandardPackagingFactory.java
+  state/
+    ShippingContext.java             (State context)
+    RegionState.java                (State interface)
+    EgyptState.java
+    UAEState.java
+    EuropeState.java
+  observer/
+    CourierObserver.java            (Observer interface)
+    VehicleSubject.java             (Subject interface)
+    VehicleDispatcher.java          (Concrete Subject)
+    AvailableCourier.java           (Concrete Observer)
+  proxy/
+    VehicleService.java             (Subject interface)
+    RealVehicleService.java
+    VehicleServiceProxy.java
+  config/
+    PricingConfig.java              (Singleton)
+3. Design Patterns â€” Code & Explanation
+3.1 Builder Pattern â€” ShippingOrder
+Why Builder?
+A shipping order combines vehicle, courier, packaging, country, item type, delivery date, weight, and distance. Without Builder, the constructor would need 8+ parameters and optional combinations would be unmanageable. Builder enforces step-by-step construction and produces an immutable order object.
+Classes involved
+ShippingOrder â€” the product (immutable once built)
+ShippingOrder.Builder â€” the builder (inner static class)
+Code
+// ShippingOrder.java
+package com.shipping.model;
+
+public class ShippingOrder {
+    private final String country;
+    private final String itemType;
+    private final double weight;
+    private final double distance;
+    private final String deliveryDate; // 'EXPRESS' or 'STANDARD'
+    private final String vehicleType;
+    private final String courierName;
+    private final String packagingType;
+
+    private ShippingOrder(Builder b) {
+        this.country      = b.country;
+        this.itemType     = b.itemType;
+        this.weight       = b.weight;
+        this.distance     = b.distance;
+        this.deliveryDate = b.deliveryDate;
+        this.vehicleType  = b.vehicleType;
+        this.courierName  = b.courierName;
+        this.packagingType = b.packagingType;
+    }
+
+    // Getters
+    public String getCountry()       { return country; }
+    public String getItemType()      { return itemType; }
+    public double getWeight()        { return weight; }
+    public double getDistance()      { return distance; }
+    public String getDeliveryDate()  { return deliveryDate; }
+    public String getVehicleType()   { return vehicleType; }
+    public String getCourierName()   { return courierName; }
+    public String getPackagingType() { return packagingType; }
+
+    public static class Builder {
+        private String country;
+        private String itemType;
+        private double weight;
+        private double distance;
+        private String deliveryDate = 'STANDARD';
+        private String vehicleType;
+        private String courierName;
+        private String packagingType;
+
+        public Builder country(String country)           { this.country = country; return this; }
+        public Builder itemType(String itemType)         { this.itemType = itemType; return this; }
+        public Builder weight(double weight)             { this.weight = weight; return this; }
+        public Builder distance(double distance)         { this.distance = distance; return this; }
+        public Builder deliveryDate(String date)         { this.deliveryDate = date; return this; }
+        public Builder vehicleType(String vehicleType)   { this.vehicleType = vehicleType; return this; }
+        public Builder courierName(String courierName)   { this.courierName = courierName; return this; }
+        public Builder packagingType(String packagingType) { this.packagingType = packagingType; return this; }
+
+        public ShippingOrder build() {
+            if (country == null || itemType == null || vehicleType == null)
+                throw new IllegalStateException('country, itemType, vehicleType are required');
+            return new ShippingOrder(this);
+        }
+    }
+}
+3.2 Strategy Pattern â€” Vehicle Selection
+Why Strategy?
+The system must support different selection algorithms (by country, by weight) that can be swapped without changing the client code. Strategy encapsulates each algorithm behind a common interface, so ShippingService simply calls strategy.select() and does not care which algorithm runs.
+Classes involved
+SelectionStrategy â€” interface
+ByCountrySelectionStrategy â€” filters vehicles allowed in the given country
+ByWeightSelectionStrategy â€” filters vehicles that can carry the given weight
+Code
+// SelectionStrategy.java
+package com.shipping.selection;
+import com.shipping.model.Vehicle;
+import java.util.List;
+
+public interface SelectionStrategy {
+    List<Vehicle> select(List<Vehicle> allVehicles, ShippingOrder order);
+}
+
+// ByCountrySelectionStrategy.java
+public class ByCountrySelectionStrategy implements SelectionStrategy {
+    @Override
+    public List<Vehicle> select(List<Vehicle> all, ShippingOrder order) {
+        return all.stream()
+            .filter(v -> v.getAllowedCountries().contains(order.getCountry()))
+            .collect(Collectors.toList());
+    }
+}
+
+// ByWeightSelectionStrategy.java
+public class ByWeightSelectionStrategy implements SelectionStrategy {
+    @Override
+    public List<Vehicle> select(List<Vehicle> all, ShippingOrder order) {
+        return all.stream()
+            .filter(v -> v.getMaxCapacity() >= order.getWeight())
+            .collect(Collectors.toList());
+    }
+}
+3.3 Chain of Responsibility â€” Pricing Engine
+Why Chain of Responsibility?
+Price depends on four independent factors: weight, distance, delivery date, and item type. Each factor is a separate handler that adds its portion of the price and passes the request to the next handler. Adding a new pricing factor requires only a new handler class â€” no existing code changes.
+Classes involved
+PricingHandler â€” abstract base with next-handler link
+WeightPricingHandler
+DistancePricingHandler
+DatePricingHandler
+ItemTypePricingHandler
+Code
+// PricingHandler.java
+package com.shipping.pricing;
+
+public abstract class PricingHandler {
+    protected PricingHandler next;
+
+    public PricingHandler setNext(PricingHandler next) {
+        this.next = next;
+        return next;
+    }
+
+    public abstract double handle(ShippingOrder order, double currentPrice);
+}
+
+// WeightPricingHandler.java
+public class WeightPricingHandler extends PricingHandler {
+    @Override
+    public double handle(ShippingOrder order, double currentPrice) {
+        double added = order.getWeight() * PricingConfig.getInstance().getPricePerKg();
+        double total = currentPrice + added;
+        return next != null ? next.handle(order, total) : total;
+    }
+}
+
+// DistancePricingHandler.java
+public class DistancePricingHandler extends PricingHandler {
+    @Override
+    public double handle(ShippingOrder order, double currentPrice) {
+        double added = order.getDistance() * PricingConfig.getInstance().getPricePerKm();
+        double total = currentPrice + added;
+        return next != null ? next.handle(order, total) : total;
+    }
+}
+
+// DatePricingHandler.java
+public class DatePricingHandler extends PricingHandler {
+    @Override
+    public double handle(ShippingOrder order, double currentPrice) {
+        double multiplier = order.getDeliveryDate().equals('EXPRESS') ? 1.5 : 1.0;
+        double total = currentPrice * multiplier;
+        return next != null ? next.handle(order, total) : total;
+    }
+}
+
+// ItemTypePricingHandler.java
+public class ItemTypePricingHandler extends PricingHandler {
+    @Override
+    public double handle(ShippingOrder order, double currentPrice) {
+        double surcharge = switch (order.getItemType()) {
+            case 'FRAGILE'   -> 20.0;
+            case 'LIQUID'    -> 15.0;
+            case 'OVERSIZED' -> 50.0;
+            default          -> 0.0;
+        };
+        double total = currentPrice + surcharge;
+        return next != null ? next.handle(order, total) : total;
+    }
+}
+3.4 Template Method â€” Delivery Price Calculator
+Why Template Method?
+The overall pricing algorithm skeleton is always the same: get base price, apply a date modifier, then return the total. Only the date modifier step differs between Express and Standard delivery. Template Method locks the skeleton in the base class and lets subclasses override only the varying step.
+Classes involved
+DeliveryPriceCalculator â€” abstract base (defines the skeleton)
+ExpressCalculator â€” overrides applyDateModifier() with 1.5x multiplier
+StandardCalculator â€” overrides applyDateModifier() with no change
+Code
+// DeliveryPriceCalculator.java
+package com.shipping.pricing;
+
+public abstract class DeliveryPriceCalculator {
+
+    // Template method â€” skeleton is fixed
+    public final double calculate(ShippingOrder order) {
+        double base = getBasePrice(order);
+        double modified = applyDateModifier(base);
+        return modified;
+    }
+
+    protected double getBasePrice(ShippingOrder order) {
+        return order.getWeight() * 2 + order.getDistance() * 0.5;
+    }
+
+    // Subclasses override this step only
+    protected abstract double applyDateModifier(double base);
+}
+
+// ExpressCalculator.java
+public class ExpressCalculator extends DeliveryPriceCalculator {
+    @Override
+    protected double applyDateModifier(double base) {
+        return base * 1.5; // 50% express surcharge
+    }
+}
+
+// StandardCalculator.java
+public class StandardCalculator extends DeliveryPriceCalculator {
+    @Override
+    protected double applyDateModifier(double base) {
+        return base; // no change
+    }
+}
+3.5 Factory Method â€” Packaging
+Why Factory Method?
+Each item type requires a different packaging object. Without Factory Method, the system would need a switch-case wherever packaging is created, scattering creation logic across the codebase. Factory Method centralizes it: each factory subclass knows how to create the right packaging for its item category.
+Classes involved
+Packaging â€” product interface
+PackagingFactory â€” abstract creator with createPackaging() factory method
+FragilePackagingFactory, LiquidPackagingFactory, StandardPackagingFactory â€” concrete creators
+Code
+// Packaging.java
+package com.shipping.packaging;
+
+public interface Packaging {
+    String getType();
+    String getDescription();
+}
+
+// PackagingFactory.java
+public abstract class PackagingFactory {
+    // Factory Method
+    public abstract Packaging createPackaging();
+
+    public String preparePackaging() {
+        Packaging p = createPackaging();
+        return 'Prepared: ' + p.getDescription();
+    }
+}
+
+// FragilePackagingFactory.java
+public class FragilePackagingFactory extends PackagingFactory {
+    @Override
+    public Packaging createPackaging() {
+        return new Packaging() {
+            public String getType()        { return 'FRAGILE'; }
+            public String getDescription() { return 'Bubble-wrap reinforced box'; }
+        };
+    }
+}
+
+// LiquidPackagingFactory.java
+public class LiquidPackagingFactory extends PackagingFactory {
+    @Override
+    public Packaging createPackaging() {
+        return new Packaging() {
+            public String getType()        { return 'LIQUID'; }
+            public String getDescription() { return 'Sealed waterproof container'; }
+        };
+    }
+}
+
+// StandardPackagingFactory.java
+public class StandardPackagingFactory extends PackagingFactory {
+    @Override
+    public Packaging createPackaging() {
+        return new Packaging() {
+            public String getType()        { return 'STANDARD'; }
+            public String getDescription() { return 'Standard cardboard box'; }
+        };
+    }
+}
+3.6 State Pattern â€” Country to Vehicle Rules
+Why State?
+Each country or region has its own rules about which vehicles are permitted, what the maximum weight limit is, and what documentation is required. Without State, this logic becomes a long chain of if-else or switch statements. State encapsulates each region's behavior in its own class and allows ShippingContext to delegate to it transparently.
+Classes involved
+RegionState â€” interface
+ShippingContext â€” holds current state, delegates to it
+EgyptState, UAEState, EuropeState â€” concrete states
+Code
+// RegionState.java
+package com.shipping.state;
+
+public interface RegionState {
+    List<String> getAllowedVehicles();
+    double getMaxWeight();
+    String getRequiredDocumentation();
+}
+
+// EgyptState.java
+public class EgyptState implements RegionState {
+    public List<String> getAllowedVehicles()      { return List.of('Truck', 'Van'); }
+    public double getMaxWeight()                  { return 2000.0; }
+    public String getRequiredDocumentation()      { return 'Customs form EG-01'; }
+}
+
+// UAEState.java
+public class UAEState implements RegionState {
+    public List<String> getAllowedVehicles()      { return List.of('Truck', 'Drone', 'Van'); }
+    public double getMaxWeight()                  { return 5000.0; }
+    public String getRequiredDocumentation()      { return 'GCC clearance certificate'; }
+}
+
+// EuropeState.java
+public class EuropeState implements RegionState {
+    public List<String> getAllowedVehicles()      { return List.of('Truck', 'Ship', 'Van'); }
+    public double getMaxWeight()                  { return 10000.0; }
+    public String getRequiredDocumentation()      { return 'EU customs declaration'; }
+}
+
+// ShippingContext.java
+public class ShippingContext {
+    private RegionState state;
+
+    public void setState(RegionState state) { this.state = state; }
+
+    public List<String> getAllowedVehicles()  { return state.getAllowedVehicles(); }
+    public double getMaxWeight()              { return state.getMaxWeight(); }
+    public String getDocumentation()          { return state.getRequiredDocumentation(); }
+}
+3.7 Observer Pattern â€” Courier Assignment
+Why Observer?
+When a vehicle is dispatched to a delivery, all available couriers should be notified so they can decide to accept the job. Observer fully decouples the vehicle (subject) from the couriers (observers): the vehicle does not know which couriers exist, and couriers can be added or removed at runtime without touching the vehicle code.
+Classes involved
+CourierObserver â€” observer interface
+VehicleSubject â€” subject interface
+VehicleDispatcher â€” concrete subject, holds and notifies observers
+AvailableCourier â€” concrete observer
+Code
+// CourierObserver.java
+package com.shipping.observer;
+
+public interface CourierObserver {
+    void onVehicleDispatched(String vehicleType, String destination);
+}
+
+// VehicleSubject.java
+public interface VehicleSubject {
+    void addObserver(CourierObserver o);
+    void removeObserver(CourierObserver o);
+    void notifyObservers(String vehicleType, String destination);
+}
+
+// VehicleDispatcher.java
+public class VehicleDispatcher implements VehicleSubject {
+    private final List<CourierObserver> observers = new ArrayList<>();
+
+    public void addObserver(CourierObserver o)    { observers.add(o); }
+    public void removeObserver(CourierObserver o) { observers.remove(o); }
+
+    public void notifyObservers(String vehicleType, String destination) {
+        for (CourierObserver o : observers) {
+            o.onVehicleDispatched(vehicleType, destination);
+        }
+    }
+
+    public void dispatch(String vehicleType, String destination) {
+        System.out.println('Dispatching ' + vehicleType + ' to ' + destination);
+        notifyObservers(vehicleType, destination);
+    }
+}
+
+// AvailableCourier.java
+public class AvailableCourier implements CourierObserver {
+    private final String name;
+    public AvailableCourier(String name) { this.name = name; }
+
+    @Override
+    public void onVehicleDispatched(String vehicleType, String destination) {
+        System.out.println(name + ' notified: ' + vehicleType + ' going to ' + destination);
+    }
+}
+3.8 Decorator Pattern â€” Review System
+Why Decorator?
+The review system must add rating and feedback functionality to any courier without modifying the Courier class. Decorator wraps an existing Courier object and adds the review layer transparently. New kinds of decoration (e.g., InsuredCourier, PriorityCourier) can be stacked on top of each other at runtime.
+Classes involved
+Courier â€” component interface
+BasicCourier â€” concrete component
+CourierDecorator â€” abstract decorator
+ReviewableCourier â€” concrete decorator that adds rating and review
+Code
+// Courier.java
+package com.shipping.model;
+
+public interface Courier {
+    String getName();
+    String deliver(ShippingOrder order);
+}
+
+// BasicCourier.java
+public class BasicCourier implements Courier {
+    private final String name;
+    public BasicCourier(String name) { this.name = name; }
+
+    public String getName()                      { return name; }
+    public String deliver(ShippingOrder order)   {
+        return name + ' delivered order to ' + order.getCountry();
+    }
+}
+
+// CourierDecorator.java
+public abstract class CourierDecorator implements Courier {
+    protected final Courier wrapped;
+    public CourierDecorator(Courier courier) { this.wrapped = courier; }
+
+    public String getName()                    { return wrapped.getName(); }
+    public String deliver(ShippingOrder order) { return wrapped.deliver(order); }
+}
+
+// ReviewableCourier.java
+public class ReviewableCourier extends CourierDecorator {
+    private final List<String> reviews = new ArrayList<>();
+    private double totalRating = 0;
+    private int ratingCount = 0;
+
+    public ReviewableCourier(Courier courier) { super(courier); }
+
+    public void addReview(String review, double rating) {
+        reviews.add(review);
+        totalRating += rating;
+        ratingCount++;
+    }
+
+    public double getAverageRating() {
+        return ratingCount == 0 ? 0 : totalRating / ratingCount;
+    }
+
+    public List<String> getReviews() { return reviews; }
+
+    @Override
+    public String deliver(ShippingOrder order) {
+        String result = super.deliver(order);
+        return result + ' [Rated: ' + String.format('%.1f', getAverageRating()) + '/5]';
+    }
+}
+3.9 Proxy Pattern â€” Vehicle Availability
+Why Proxy?
+Fetching vehicle availability from the database is expensive. The Virtual Proxy sits in front of the real service and caches results keyed by country + weight. On repeated queries with the same parameters, the proxy returns the cached result instantly without hitting the database. The client (ShippingService) only knows the VehicleService interface and is unaware a proxy is involved.
+Classes involved
+VehicleService â€” subject interface
+RealVehicleService â€” real, expensive implementation
+VehicleServiceProxy â€” caching proxy
+Code
+// VehicleService.java
+package com.shipping.proxy;
+import com.shipping.model.Vehicle;
+
+public interface VehicleService {
+    List<Vehicle> getAvailableVehicles(String country, double weight);
+}
+
+// RealVehicleService.java
+public class RealVehicleService implements VehicleService {
+    @Override
+    public List<Vehicle> getAvailableVehicles(String country, double weight) {
+        System.out.println('[DB] Fetching vehicles for ' + country + ', ' + weight + 'kg');
+        // Simulate database call
+        return List.of(
+            new Vehicle('Truck',  List.of('EG','AE','SA'), 5000),
+            new Vehicle('Drone',  List.of('AE','SA'),       10),
+            new Vehicle('Van',    List.of('EG','AE','SA'), 500),
+            new Vehicle('Ship',   List.of('EG','AE'),    50000)
+        ).stream()
+         .filter(v -> v.getAllowedCountries().contains(country))
+         .filter(v -> v.getMaxCapacity() >= weight)
+         .collect(Collectors.toList());
+    }
+}
+
+// VehicleServiceProxy.java
+public class VehicleServiceProxy implements VehicleService {
+    private final RealVehicleService real = new RealVehicleService();
+    private final Map<String, List<Vehicle>> cache = new HashMap<>();
+
+    @Override
+    public List<Vehicle> getAvailableVehicles(String country, double weight) {
+        String key = country + '_' + weight;
+        if (cache.containsKey(key)) {
+            System.out.println('[Cache] Hit for ' + key);
+            return cache.get(key);
+        }
+        List<Vehicle> result = real.getAvailableVehicles(country, weight);
+        cache.put(key, result);
+        return result;
+    }
+}
+3.10 Singleton Pattern â€” PricingConfig
+Why Singleton?
+Pricing rates (price per kg, price per km) must be consistent across all handlers. Singleton ensures only one PricingConfig instance exists in the JVM, so every handler reads from the same configuration. It also prevents expensive re-initialization of configuration data on each request.
+Code
+// PricingConfig.java
+package com.shipping.config;
+
+public class PricingConfig {
+    private static PricingConfig instance;
+    private double pricePerKg = 2.5;
+    private double pricePerKm = 0.5;
+
+    private PricingConfig() {} // private constructor
+
+    public static synchronized PricingConfig getInstance() {
+        if (instance == null) {
+            instance = new PricingConfig();
+        }
+        return instance;
+    }
+
+    public double getPricePerKg() { return pricePerKg; }
+    public double getPricePerKm() { return pricePerKm; }
+    public void setPricePerKg(double v) { this.pricePerKg = v; }
+    public void setPricePerKm(double v) { this.pricePerKm = v; }
+}
+3.11 Facade Pattern â€” ShippingService
+Why Facade?
+The client should not need to know about pricing handlers, state objects, observer lists, proxy caches, or factories. The Facade provides one simple class â€” ShippingService â€” that orchestrates all subsystems internally. The client calls one method and gets a result.
+Code
+// ShippingService.java
+package com.shipping.facade;
+
+public class ShippingService {
+    private final VehicleService vehicleService = new VehicleServiceProxy();
+    private final VehicleDispatcher dispatcher = new VehicleDispatcher();
+    private final ShippingContext context = new ShippingContext();
+
+    public double calculatePrice(ShippingOrder order) {
+        // Build chain of responsibility
+        PricingHandler weight = new WeightPricingHandler();
+        PricingHandler distance = new DistancePricingHandler();
+        PricingHandler date = new DatePricingHandler();
+        PricingHandler itemType = new ItemTypePricingHandler();
+        weight.setNext(distance).setNext(date).setNext(itemType);
+        return weight.handle(order, 0.0);
+    }
+
+    public List<Vehicle> getAvailableVehicles(ShippingOrder order) {
+        // Proxy handles caching transparently
+        return vehicleService.getAvailableVehicles(
+            order.getCountry(), order.getWeight()
+        );
+    }
+
+    public void dispatchOrder(ShippingOrder order) {
+        // Set country state
+        context.setState(resolveState(order.getCountry()));
+        // Notify couriers via Observer
+        dispatcher.dispatch(order.getVehicleType(), order.getCountry());
+    }
+
+    public Packaging getPackaging(ShippingOrder order) {
+        PackagingFactory factory = switch (order.getItemType()) {
+            case 'FRAGILE'   -> new FragilePackagingFactory();
+            case 'LIQUID'    -> new LiquidPackagingFactory();
+            default          -> new StandardPackagingFactory();
+        };
+        return factory.createPackaging();
+    }
+
+    public void registerCourier(AvailableCourier courier) {
+        dispatcher.addObserver(courier);
+    }
+
+    private RegionState resolveState(String country) {
+        return switch (country) {
+            case 'AE' -> new UAEState();
+            case 'EG' -> new EgyptState();
+            default   -> new EuropeState();
+        };
+    }
+}
+4. Main â€” Putting It All Together
+// Main.java
+public class Main {
+    public static void main(String[] args) {
+        ShippingService service = new ShippingService();
+
+        // Register couriers (Observer)
+        service.registerCourier(new AvailableCourier('Ahmed'));
+        service.registerCourier(new AvailableCourier('Sara'));
+
+        // Build order (Builder)
+        ShippingOrder order = new ShippingOrder.Builder()
+            .country('AE')
+            .itemType('FRAGILE')
+            .weight(15.0)
+            .distance(300.0)
+            .deliveryDate('EXPRESS')
+            .vehicleType('Truck')
+            .courierName('Ahmed')
+            .packagingType('FRAGILE')
+            .build();
+
+        // Get available vehicles (Proxy + State + Strategy)
+        List<Vehicle> vehicles = service.getAvailableVehicles(order);
+        System.out.println('Available: ' + vehicles);
+
+        // Calculate price (Chain of Responsibility + Template Method)
+        double price = service.calculatePrice(order);
+        System.out.println('Price: $' + price);
+
+        // Get packaging (Factory Method)
+        Packaging pkg = service.getPackaging(order);
+        System.out.println('Packaging: ' + pkg.getDescription());
+
+        // Dispatch â€” notifies observers (Observer)
+        service.dispatchOrder(order);
+
+        // Review courier (Decorator)
+        Courier courier = new BasicCourier('Ahmed');
+        ReviewableCourier reviewed = new ReviewableCourier(courier);
+        reviewed.deliver(order);
+        reviewed.addReview('Fast delivery!', 5.0);
+        reviewed.addReview('Careful handling', 4.5);
+        System.out.println('Rating: ' + reviewed.getAverageRating());
+    }
+}
+5. Summary
+The table below recaps every design decision and the problem each pattern solves:
+Feature
+Pattern
+Why
+Vehicle & courier selection
+Strategy
+Swap selection algorithms (by country, by weight) without changing ShippingService.
+Pricing engine
+Chain of Responsibility
+Each pricing factor is an independent handler; adding a new factor requires zero changes to existing handlers.
+Packaging type
+Factory Method
+Creation logic for each packaging type is isolated in its own factory subclass.
+Order creation
+Builder
+Avoids an 8-parameter constructor; enforces required fields at build() time.
+Country vehicle rules
+State
+Each region's rules live in their own class; ShippingContext delegates without any if-else chain.
+Courier assignment
+Observer
+Vehicle and courier are fully decoupled; couriers subscribe and are notified automatically.
+Review system
+Decorator
+Review capability is added to any Courier at runtime by wrapping, not by modifying the class.
+Delivery date pricing
+Template Method
+The algorithm skeleton is fixed; only the date-modifier step varies between Express and Standard.
+Vehicle DB lookup
+Proxy
+Caches expensive database queries; client code is unaware of the cache.
+Shared configuration
+Singleton
+One PricingConfig instance shared by all handlers; prevents inconsistent rates.
+System entry point
+Facade
+Client interacts with one class; all subsystem complexity is hidden.
